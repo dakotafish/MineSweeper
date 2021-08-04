@@ -9,6 +9,7 @@ from threading import Thread
 #
 import utils
 from param_protocol import Params
+from heartbeat_protocol import HeartBeat
 
 
 os.environ['MAVLINK20'] = '1'
@@ -40,24 +41,44 @@ class Copter:
         self.initialize_message_router()
         self.params = None
         self.initialize_params()
-        # self.heartbeat = None
-        # self.initialize_heartbeat()
+        self.heartbeat = None
+        self.initialize_heartbeat()
 
     def initialize_message_router(self):
-        self.message_router_thread = Thread(target=self.message_router, daemon=True)
+        self.message_router_thread = Thread(target=self.drain_mav, daemon=True)
         self.message_router_thread.start()
         self.mav_connection.message_hooks.append(self.message_router)
+
+    def drain_mav(self):
+        """
+        This appears to do nothing with the messages but every time this reads in a message
+          the MAV also routes that message to our message_hooks (ie message_router)
+        """
+        draining = True
+        while draining:
+            # an endless loop that keeps reading in messages
+            message = self.mav_connection.recv_match(blocking=False, timeout=1)
+            #time.sleep(.01)
+            #break
+            #if message:
+                #print(message)
+                #continue
+                #self.message_router(message=message)
+            #else:
+                #continue
+                #draining = False
 
     def message_router(self, mav_connection=None, message=None):
         if not message:
             return None
         message_type = message.get_type()
+        #print(message_type)
         if message_type in self.message_stats:
             m_stat = self.message_stats[message_type]
             m_stat['count'] += 1
-            m_stat['messages'].append(message)
+            #m_stat['messages'].append(message)
         else:
-            self.message_stats[message_type] = {"count": 1, "messages": [message]}
+            self.message_stats[message_type] = {"count": 1}#, "messages": [message]}
         if message_type in self.message_listeners:
             message_listeners = self.message_listeners[message_type]
             for message_listener in message_listeners:
@@ -75,6 +96,11 @@ class Copter:
                                    target_system=self.target_system,
                                    target_component=self.target_component)
         #self.mav_connection.message_hooks.append(self.heartbeat.heartbeat_message_hook)
+        self.message_listeners["HEARTBEAT"].append(self.heartbeat.heartbeat_message_hook)
+        while not self.heartbeat.heartbeat:
+            # waiting..
+            time.sleep(.1)
+        print("Heartbeat Initialized!")
 
     def connect(self):
         if self.mav_connection is None:
@@ -93,6 +119,7 @@ class Copter:
             LOGGER.debug("HOOKED, YEEHAW!\t" + str(msg))
 
     def run_prearm_checks(self):
+        # https://mavlink.io/en/services/arm_authorization.html
         # https://mavlink.io/en/messages/common.html#MAV_CMD_RUN_PREARM_CHECKS
         ack_message = self.send_long_command(command=401)
         sys_status = None
@@ -289,6 +316,8 @@ if __name__ == "__main__":
     copter = Copter()
     big_print("Connecting to Copter")
     copter.connect()
+    #copter.initialize_message_router()
+    #copter.initialize_params()
     #copter.post_initialization()
     #time.sleep(10)
     # copter.add_logging_message_hook()

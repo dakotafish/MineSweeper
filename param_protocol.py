@@ -28,8 +28,8 @@ class Param(object):
 
 class Params(dict):
     """
-    The Params class subclasses the dictionary class; storing each param as a key/value pair
-     - It also implements a message_hook, a queue, and a thread to broker in the param messages
+    Subclasses dict; storing each param as a key/value pair
+     - also implements a message_hook, a queue, and a thread to broker in the param messages
     """
     def __init__(self, mav_connection=None, target_system=0, target_component=0, *args, **kwargs):
         super(dict, self).__init__(*args, **kwargs)
@@ -71,7 +71,6 @@ class Params(dict):
 
     def drain_message_queue(self):
         # loops through the message queue and updates each parameter
-        #  Note: when this method is called from drain_param_messages_from_mav() it is likely running in its own thread
         while not self.message_queue.empty():
             message = self.message_queue.get(block=False, timeout=1)
             self.receive_message(message)
@@ -129,3 +128,16 @@ class Params(dict):
             print(f"PARAM UPDATE FAILED! Desired Value: {param_value}\t Actual Value: {updated_param.value}")
             LOGGER.error(f"PARAM UPDATE FAILED! Desired Value: {param_value}\t Actual Value: {updated_param.value}")
         return updated_param
+
+
+# def disable_radio_failsafe(self):
+#     """Update a couple params to allow arming without an RC connection.
+#         https://ardupilot.org/copter/docs/common-gcs-only-operation.html#copter"""
+#     print("Disabling RC failsafes.")
+#     # disable the throttle failsafe param
+#     #self.set_param("FS_THR_ENABLE", 0)
+#     self.params.set_param("FS_THR_ENABLE", 0)
+#     # disable the 'RC Channels' bit in the ARMING_CHECK param
+#     # Note: 65470 is a bitmask that evaluates to: [False, True, True, True, True, True, False, True, True, True, True, True, True, True, True, True]
+#     #self.set_param("ARMING_CHECK", 65470)
+#     self.params.set_param("ARMING_CHECK", 65470)

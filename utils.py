@@ -44,3 +44,29 @@ def bit_mapper(map, debug=False):
 #         # for i in bit_mask:
 #         #     print("Flag Name: {1}\t\t Flag Value: {2} \n\t Flag Description: {3}".format(i[0], i[2], i[1]))
 #     return bit_mask
+#
+#
+# def get_mav_cmd(key=None, name=None, name_contains=None):
+#     command = None
+#     possible_commands = []
+#     if key:
+#         command = mavutil.mavlink.enums["MAV_CMD"][key.upper()]
+#     elif name or name_contains:
+#         for k, v in mavutil.mavlink.enums["MAV_CMD"].items():
+#             if name:
+#                 if v.name == name.upper():
+#                     command = v
+#         if not command:
+#             searching_for = name_contains or name
+#             for k, v in mavutil.mavlink.enums["MAV_CMD"].items():
+#                 if searching_for.upper() in v.name:
+#                     possible_commands.append(v)
+#     if command:
+#         print("command.name \t {}".format(command.name))
+#         print("command.dcription \t {}".format(command.description))
+#         print("command.param \t {}".format(str(command.param)))
+#     else:
+#         for command in possible_commands:
+#             print("command.name \t {}".format(command.name))
+#             print("command.dcription \t {}".format(command.description))
+#             print("command.param \t {}".format(str(command.param)))
