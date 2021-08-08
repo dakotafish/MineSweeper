@@ -34,6 +34,7 @@ class Copter:
         self.message_listeners = {
             "HEARTBEAT": [],
             "PARAM_VALUE": [],
+            "COMMAND_ACK": dict(),
         }
 
         self.message_stats = dict()
@@ -73,16 +74,20 @@ class Copter:
             return None
         message_type = message.get_type()
         #print(message_type)
-        if message_type in self.message_stats:
-            m_stat = self.message_stats[message_type]
-            m_stat['count'] += 1
-            #m_stat['messages'].append(message)
-        else:
-            self.message_stats[message_type] = {"count": 1}#, "messages": [message]}
+        # if message_type in self.message_stats:
+        #     m_stat = self.message_stats[message_type]
+        #     m_stat['count'] += 1
+        #     #m_stat['messages'].append(message)
+        # else:
+        #     self.message_stats[message_type] = {"count": 1}#, "messages": [message]}
         if message_type in self.message_listeners:
             message_listeners = self.message_listeners[message_type]
-            for message_listener in message_listeners:
-                message_listener(message)
+            if type(message_listeners) == list:
+                for message_listener in message_listeners:
+                    message_listener(message)
+            elif type(message_listeners) == dict:
+                for message_listener in message_listeners.values():
+                    message_listener(message)
 
     def initialize_params(self):
         self.params = Params(mav_connection=self.mav_connection,
