@@ -10,12 +10,14 @@ from threading import Thread
 import utils
 from param_protocol import Params
 from heartbeat_protocol import HeartBeat
+from command_protocol import CommandQueue, MavCommand
 
 
 os.environ['MAVLINK20'] = '1'
 mavutil.set_dialect("ardupilotmega")
 
 LOGGER = utils.create_logger("copter")
+MAV_RESULTS = mavutil.mavlink.enums["MAV_RESULT"]
 
 
 class Copter:
@@ -26,24 +28,29 @@ class Copter:
         self.target_component = 1
         self.mav_connection = None
         self.armed = False
-        self.MAV_RESULT_CONSTANTS = mavutil.mavlink.enums["MAV_RESULT"]
 
         self.set_signal_handler()
         self.connect()
+
+        self.log_all_messages = False
+        if self.log_all_messages:
+            self.mav_connection.message_hooks.append(self.logging_message_hook)
 
         self.message_listeners = {
             "HEARTBEAT": [],
             "PARAM_VALUE": [],
             "COMMAND_ACK": dict(),
         }
-
         self.message_stats = dict()
         self.message_router_thread = None
         self.initialize_message_router()
-        self.params = None
-        self.initialize_params()
         self.heartbeat = None
         self.initialize_heartbeat()
+        self.params = None
+        self.initialize_params()
+        self.command_queue = None
+        self.initialize_command_queue()
+        time.sleep(10)
 
     def initialize_message_router(self):
         self.message_router_thread = Thread(target=self.drain_mav, daemon=True)
@@ -55,31 +62,19 @@ class Copter:
         This appears to do nothing with the messages but every time this reads in a message
           the MAV also routes that message to our message_hooks (ie message_router)
         """
-        draining = True
-        while draining:
+        self.draining = True
+        while self.draining:
             # an endless loop that keeps reading in messages
+            # each time we read a message it is also sent to each of the mav_connection.message_hooks
+            # Note: The only real message_hook that we install (as of now) is self.message_router()
             message = self.mav_connection.recv_match(blocking=False, timeout=1)
-            #time.sleep(.01)
-            #break
-            #if message:
-                #print(message)
-                #continue
-                #self.message_router(message=message)
-            #else:
-                #continue
-                #draining = False
+            time.sleep(.01)
 
     def message_router(self, mav_connection=None, message=None):
         if not message:
             return None
+        self.add_to_message_stats(message)
         message_type = message.get_type()
-        #print(message_type)
-        # if message_type in self.message_stats:
-        #     m_stat = self.message_stats[message_type]
-        #     m_stat['count'] += 1
-        #     #m_stat['messages'].append(message)
-        # else:
-        #     self.message_stats[message_type] = {"count": 1}#, "messages": [message]}
         if message_type in self.message_listeners:
             message_listeners = self.message_listeners[message_type]
             if type(message_listeners) == list:
@@ -89,6 +84,23 @@ class Copter:
                 for message_listener in message_listeners.values():
                     message_listener(message)
 
+    def add_to_message_stats(self, message):
+        message_type = message.get_type()
+        if message_type in self.message_stats:
+            self.message_stats[message_type] += 1
+        else:
+            self.message_stats[message_type] = 1
+
+    def initialize_heartbeat(self):
+        self.heartbeat = HeartBeat(mav_connection=self.mav_connection,
+                                   target_system=self.target_system,
+                                   target_component=self.target_component)
+        self.message_listeners["HEARTBEAT"].append(self.heartbeat.heartbeat_message_hook)
+        while not self.heartbeat.heartbeat:
+            # waiting..
+            time.sleep(.5)
+        print("Heartbeat Initialized!")
+
     def initialize_params(self):
         self.params = Params(mav_connection=self.mav_connection,
                              target_system=self.target_system,
@@ -96,136 +108,105 @@ class Copter:
         self.message_listeners["PARAM_VALUE"].append(self.params.param_message_hook)
         self.params.get_all_params()
 
-    def initialize_heartbeat(self):
-        self.heartbeat = HeartBeat(mav_connection=self.mav_connection,
-                                   target_system=self.target_system,
-                                   target_component=self.target_component)
-        #self.mav_connection.message_hooks.append(self.heartbeat.heartbeat_message_hook)
-        self.message_listeners["HEARTBEAT"].append(self.heartbeat.heartbeat_message_hook)
-        while not self.heartbeat.heartbeat:
-            # waiting..
-            time.sleep(.1)
-        print("Heartbeat Initialized!")
+    def initialize_command_queue(self):
+        self.command_queue = CommandQueue(self)
+
+    def logging_message_hook(self, *args):
+        print(args[1])
+        LOGGER.debug("MESSAGE_HOOK_LOGGER: {}".format(str(args[1])))
+
+    ### State Commands ###
 
     def connect(self):
         if self.mav_connection is None:
             self.mav_connection = mavutil.mavlink_connection(self.connection_string)
-        self.start_timeout_timer()
+        self.start_timeout_timer(30)
+        print("Waiting for Heartbeat...")
         m = self.mav_connection.wait_heartbeat(blocking=True, timeout=30)
         self.stop_timeout_timer()
-        print("Heartbeat? \n" + str(m))
+        print(str(m))
 
-    def add_logging_message_hook(self):
-        self.mav_connection.message_hooks.append(self.log_message_hook)
-
-    def log_message_hook(self, *args):
-        msg = args[1]
-        if msg.get_type() != "PARAM_VALUE":
-            LOGGER.debug("HOOKED, YEEHAW!\t" + str(msg))
-
-    def run_prearm_checks(self):
-        # https://mavlink.io/en/services/arm_authorization.html
-        # https://mavlink.io/en/messages/common.html#MAV_CMD_RUN_PREARM_CHECKS
-        ack_message = self.send_long_command(command=401)
-        sys_status = None
-        self.start_timeout_timer(30)
-        while not sys_status:
-            sys_status = self.mav_connection.recv_match(type='SYS_STATUS', blocking=True, timeout=5)
-            time.sleep(.5)
-        self.stop_timeout_timer()
-        for k, v in sys_status.__dict__.items():
-            print(k, v)
-
-    def check_system_status(self):
-        m = None
-        self.start_timeout_timer()
-        while not m:
-            m = self.mav_connection.recv_match(type='SYS_STATUS', blocking=True, timeout=5)
-        self.stop_timeout_timer()
-        for k, v in m.__dict__.items():
-            print(k, v)
-
-    def arm_vehicle(self, force=False):
+    def arm_vehicle(self, force=False, send=True):
         # https://mavlink.io/en/messages/common.html#MAV_CMD_COMPONENT_ARM_DISARM
         force_arm = 0
         if force:
             force_arm = 21196
-        ack_message = self.send_long_command(command=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, p1=1, p2=force_arm)
-        if ack_message.result == 0:
-            self.armed = True
-        print(str(ack_message))
+        arm_command = MavCommand(mav_connection=self.mav_connection,
+                                 command_id=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                                 p1=1,
+                                 p2=force_arm)
+        self.command_queue.put(arm_command)
+        self.armed = True
+        if send:
+            self.command_queue.send_commands()
 
-    def alt_arm_vehicle(self):
-        m = self.mav_connection.arducopter_arm()
-        print(m)
-
-    def set_flight_mode(self, mode="STABILIZE"):
+    def set_flight_mode(self, mode="STABALIZE", send=True):
         LOGGER.debug("Setting flight mode: {}".format(mode))
         mode_id = self.mav_connection.mode_mapping()[mode]
         base_mode = mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
-        ack_message = self.send_long_command(command=mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+        set_flight_mode_command = MavCommand(mav_connection=self.mav_connection,
+                                             command_id=mavutil.mavlink.MAV_CMD_DO_SET_MODE,
                                              p1=base_mode,
                                              p2=mode_id)
-        return ack_message
+        self.command_queue.put(set_flight_mode_command)
+        if send:
+            self.command_queue.send_commands()
 
-    def send_long_command(self, target_system=None, target_component=None, command=None, confirmation=0,
-                          p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0):
-        target_system = target_system or self.target_system
-        target_component = target_component or self.target_component
-        self.start_timeout_timer(30)
-        while True:
-            self.mav_connection.mav.command_long_send(target_system,
-                                                      target_component,
-                                                      command,
-                                                      confirmation,
-                                                      p1, p2, p3, p4, p5, p6, p7)
-            time.sleep(.5)
-            ack_message = self.mav_connection.recv_match(type="COMMAND_ACK")
-            if ack_message:
-                if ack_message.command == command:
-                    self.stop_timeout_timer()
-                    if ack_message.result != 0:
-                        # see mav_result options: for k, v in mavutil.mavlink.enums["MAV_RESULT"].items(): print(v.name)
-                        result = self.MAV_RESULT_CONSTANTS[ack_message.result]
-                        print("Result of command was not MAV_RESULT_ACCEPTED (aka 0).\nack_message: {}"\
-                              "\n\tResult name: {} \n\tResult description: {}".format(ack_message, result.name, result.description))
-                    else:
-                        print("Received successful ack_message: {}".format(ack_message))
-                    return ack_message
-            else:
-                # mavlink command protocol says we should increment confirmation if the command drops
-                #  https://mavlink.io/en/services/command.html
-                confirmation += 1
-
-    def set_message_interval(self, message_id, frequency_hz):
+    def set_message_interval(self, message_id, frequency_hz, send=True):
         """https://mavlink.io/en/messages/common.html#MAV_CMD_SET_MESSAGE_INTERVAL
             Set the inverval between messages for a particular MAVLink message ID.
               Set frequency_hz == -1 to disable the data stream
               Set frequency_hz == 0 to request the default stream rate
             Note: this replaces REQUEST_DATA_STREAM"""
         frequency_hz = 1e6 / frequency_hz
-        ack_message = self.send_long_command(command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                                             p1=message_id, p2=frequency_hz)
-        return ack_message
+        set_message_interval_command = MavCommand(mav_connection=self.mav_connection,
+                                                  command_id=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                                                  p1=message_id,
+                                                  p2=frequency_hz)
+        self.command_queue.put(set_message_interval_command)
+        if send:
+            self.command_queue.send_commands()
 
     def disable_radio_failsafe(self):
         """Update a couple params to allow arming without an RC connection.
             https://ardupilot.org/copter/docs/common-gcs-only-operation.html#copter"""
         print("Disabling RC failsafes.")
         # disable the throttle failsafe param
-        #self.set_param("FS_THR_ENABLE", 0)
         self.params.set_param("FS_THR_ENABLE", 0)
         # disable the 'RC Channels' bit in the ARMING_CHECK param
         # Note: 65470 is a bitmask that evaluates to: [False, True, True, True, True, True, False, True, True, True, True, True, True, True, True, True]
-        #self.set_param("ARMING_CHECK", 65470)
         self.params.set_param("ARMING_CHECK", 65470)
 
-    def simple_takeoff(self, target_altitude):
+    def set_home_position(self, send=True):
+        set_home_position_command = MavCommand(mav_connection=self.mav_connection,
+                                               command_id=mavutil.mavlink.MAV_CMD_DO_SET_HOME,
+                                               p1=1)
+        self.command_queue.put(set_home_position_command)
+        if send:
+            self.command_queue.send_commands()
+
+    ### NAV Commands ###
+
+    def simple_takeoff(self, target_altitude, send=True):
         if self.armed:
             target_altitude = float(target_altitude)
-            ack_message = self.send_long_command(command=mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, p7=target_altitude)
+            simple_takeoff_command = MavCommand(mav_connection=self.mav_connection,
+                                                command_id=mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                                                p7=target_altitude)
+            self.command_queue.put(simple_takeoff_command)
+            if send:
+                self.command_queue.send_commands()
         else:
             print("Copter must be armed before it can take off.")
+
+    def simple_land(self, send=True):
+        simple_land_command = MavCommand(mav_connection=self.mav_connection,
+                                         command_id=mavutil.mavlink.MAV_CMD_NAV_LAND)
+        self.command_queue.put(simple_land_command)
+        if send:
+            self.command_queue.send_commands()
+
+    ### Timeout Signals and Handlers ###
 
     def start_timeout_timer(self, timeout=5):
         # requests that a SIGALRM signal is sent after the timeout period (in seconds)
@@ -283,64 +264,18 @@ class TimeoutError(Error):
         LOGGER.error(message)
 
 
-def big_print(text):
-    print("######")
-    print("############### {}  ###############".format(text))
-    print("######")
-
-def get_mav_cmd(key=None, name=None, name_contains=None):
-    command = None
-    possible_commands = []
-    if key:
-        command = mavutil.mavlink.enums["MAV_CMD"][key.upper()]
-    elif name or name_contains:
-        for k, v in mavutil.mavlink.enums["MAV_CMD"].items():
-            if name:
-                if v.name == name.upper():
-                    command = v
-        if not command:
-            searching_for = name_contains or name
-            for k, v in mavutil.mavlink.enums["MAV_CMD"].items():
-                if searching_for.upper() in v.name:
-                    possible_commands.append(v)
-    if command:
-        print("command.name \t {}".format(command.name))
-        print("command.dcription \t {}".format(command.description))
-        print("command.param \t {}".format(str(command.param)))
-    else:
-        for command in possible_commands:
-            print("command.name \t {}".format(command.name))
-            print("command.dcription \t {}".format(command.description))
-            print("command.param \t {}".format(str(command.param)))
-
-
-
 
 if __name__ == "__main__":
     #copter = Copter("udpin:192.168.1.17:14550")
+    utils.big_print("Connecting to Copter")
     copter = Copter()
-    big_print("Connecting to Copter")
-    copter.connect()
-    #copter.initialize_message_router()
-    #copter.initialize_params()
-    #copter.post_initialization()
-    #time.sleep(10)
-    # copter.add_logging_message_hook()
-    # big_print("Setting Flight Mode")
-    # copter.set_flight_mode("GUIDED")
-    # big_print("Getting all Params")
-    # #copter.get_all_params()
-    # # example_param_to_set = "VTX_ENABLE"
-    # # #big_print("Setting a parameter: {}".format(example_param_to_set))
-    # # #copter.set_param(example_param_to_set, 1)
-    # # big_print("Setting some message interval")
-    # # copter.set_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE, 3)
-    # copter.disable_radio_failsafe()
-    # #big_print("Checking system status.")
-    # #copter.run_prearm_checks()
-    # big_print("Arming Vehicle")
-    # copter.arm_vehicle(force=False)
-    # #copter.alt_arm_vehicle()
-    # big_print("Taking off!")
-    # copter.simple_takeoff(10)
-
+    utils.big_print("Disabling Radio Failsafe")
+    copter.disable_radio_failsafe()
+    utils.big_print("Adding Set Flight Mode Command to Command Queue")
+    copter.set_flight_mode("GUIDED", send=False)
+    utils.big_print("Adding Set Home Position Command to Command Queue")
+    #copter.set_home_position(send=False)
+    utils.big_print("Adding Arm Vehicle Command to Command Queue")
+    copter.arm_vehicle(force=False, send=False)
+    utils.big_print("Adding Takeoff Command to Command Queue and Sending all commands.")
+    copter.simple_takeoff(target_altitude=20, send=True)

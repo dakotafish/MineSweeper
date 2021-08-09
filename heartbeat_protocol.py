@@ -18,6 +18,9 @@ class HeartBeatMessage(object):
         self.mavlink_version = message.mavlink_version
         self.raw_message = message
 
+    def __str__(self):
+        return str(self.raw_message)
+
 class HeartBeat(object):
     """
     message_router will route HEARTBEAT messages to the heartbeat_message_hook.
@@ -27,7 +30,7 @@ class HeartBeat(object):
     -- If the counter goes over 6 missed heartbeats then we've lost contact and should throw an exception.
     MAVLink docs: https://mavlink.io/en/services/heartbeat.html
     """
-    def __init__(self, mav_connection=None, target_system=0, target_component=0, *args, **kwargs):
+    def __init__(self, mav_connection, target_system=0, target_component=0, *args, **kwargs):
         self.mav_connection = mav_connection
         self.target_system = target_system
         self.target_component = target_component

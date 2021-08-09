@@ -45,6 +45,7 @@ class Params(dict):
     def start_message_draining_thread(self):
         # start a separate thread to drain all of the param messages
         if not self.thread.is_alive():
+            self.thread = Thread(target=self.drain_param_messages_from_mav, daemon=False)
             self.thread.start()
 
     def param_message_hook(self, message):

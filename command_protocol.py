@@ -24,14 +24,17 @@ class CommandQueue(object):
             self.copter.message_listeners["COMMAND_ACK"][command.uuid] = command.command_message_hook
             command.send_command()
             while not command.command_complete:
-                #response = self.mav_connection.recv_match(type='COMMAND_ACK', blocking=True, timeout=1)
-                time.sleep(1)
-            # once the command completes remove it from the message_listeners
+                time.sleep(.01)
+            # once the command completes we remove it from the message_listeners
             del self.copter.message_listeners["COMMAND_ACK"][command.uuid]
             self.queue.task_done()
 
-    def run_commands(self):
+    def put(self, command):
+        self.queue.put(command)
+
+    def send_commands(self):
         if not self.thread.is_alive():
+            self.thread = Thread(target=self.drain_command_queue, daemon=False)
             self.thread.start()
 
 
@@ -126,7 +129,7 @@ class MavCommand(object):
                                               self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7)
 
     def send_command(self):
-        self.command_send_method(*self.command_send_args)
+        self.command_send_method(*self.command_send_args())
 
     def command_message_hook(self, ack_message):
         assert ack_message.get_type() == "COMMAND_ACK"
@@ -134,6 +137,7 @@ class MavCommand(object):
             mav_result = MAV_RESULTS[ack_message.result]
             print(mav_result.name, mav_result.description)
             if mav_result.name == "MAV_RESULT_ACCEPTED":
+                print("Command Completed: {}".format(str(ack_message)))
                 self.command_complete = True
                 return ack_message
             elif mav_result.name == "MAV_RESULT_TEMPORARILY_REJECTED":
