@@ -101,32 +101,7 @@ class MavCommand(object):
         self.set_command_send_method()
 
     def set_command_send_method(self):
-        """
-        If self.frame is set then we send the message as COMMAND_INT, otherwise we send it as COMMAND_LONG
-        https://mavlink.io/en/messages/common.html#COMMAND_INT
-        https://mavlink.io/en/messages/common.html#COMMAND_LONG
-        """
-        if self.frame:
-            # will send as COMMAND_INT
-            self.command_send_method = self.mav_connection.mav.command_int_send
-            self.p5 = int(self.p5)
-            self.p6 = int(self.p6)
-            self.command_send_args = lambda: (self.target_system,
-                                              self.target_component,
-                                              self.frame,
-                                              self.command_id,
-                                              self.current,
-                                              self.autocontinue,
-                                              self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7)
-        else:
-            self.command_send_method = self.mav_connection.mav.command_long_send
-            self.p5 = float(self.p5)
-            self.p6 = float(self.p6)
-            self.command_send_args = lambda: (self.target_system,
-                                              self.target_component,
-                                              self.command_id,
-                                              self.confirmation,
-                                              self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7)
+        raise NotImplementedError
 
     def send_command(self):
         self.command_send_method(*self.command_send_args())
@@ -182,50 +157,58 @@ class CommandInt(MavCommand):
                  target_component=0):
         super(MavCommand, self).__init__(mav_connection,
                                          command_id,
+                                         frame=frame,
+                                         p1=p1, p2=p2, p3=p3, p4=p4, p5=p5, p6=p6, p7=p7,
                                          target_system=target_system,
-                                         target_component=target_component,
-                                         p1=p1, p2=p2, p3=p3, p4=p4, p5=p5, p6=p6, p7=p7)
-        self.frame = frame
-        self.current = 0  # always zero
-        self.autocontinue = 0  # always zero
+                                         target_component=target_component)
         self.p5 = int(self.p5)
         self.p6 = int(self.p6)
 
-    def send_command_worker(self):
-        confirmation = 0
-        timeout = 1
-        while True:
-            self.mav_connection.mav.command_int_send(self.target_system,
-                                                     self.target_component,
-                                                     self.frame,
-                                                     self.command_id,
-                                                     self.current,
-                                                     self.autocontinue,
-                                                     self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7)
-            ack_message = self.mav_connection.recv_match(type="COMMAND_ACK", blocking=True, timeout=timeout)
-            if ack_message and ack_message.command == self.command_id:
-                mav_result = MAV_RESULTS[ack_message.result]
-                print(mav_result.name, mav_result.description)
-                if mav_result.name == "MAV_RESULT_ACCEPTED":
-                    self.command_complete = True
-                    return ack_message
-                elif mav_result.name == "MAV_RESULT_TEMPORARILY_REJECTED":
-                    # most likely just need to wait for some other command to finish
-                    time.sleep(1)
-                elif mav_result.name == "MAV_RESULT_DENIED":
-                    # Command is invalid (is supported but has invalid parameters).
-                    # Retrying same command and parameters will not work.
-                    self.command_complete = True
-                    raise Exception
-                elif mav_result.name == "MAV_RESULT_FAILED":
-                    self.command_complete = True
-                    raise Exception
-                elif mav_result.name == "MAV_RESULT_IN_PROGRESS":
-                    # Per the MavLink documentation we just need to increase the timeout and wait
-                    # We don't need to re-send the command but if we do we'll just get another progress message so it
-                    # doesn't hurt to just let this loop run until the status changes to MAV_RESULT_ACCEPTED
-                    print("Command in Progress. Current at {}% complete.".format(ack_message.progress))
-                    time.sleep(1)
-            else:
-                # if the command drops for some reason then we just increment confirmation and re-send it
-                confirmation += 1
+    def set_command_send_method(self):
+        self.command_send_method = self.mav_connection.mav.command_int_send
+        self.command_send_args = lambda: (self.target_system,
+                                          self.target_component,
+                                          self.frame,
+                                          self.command_id,
+                                          self.current,
+                                          self.autocontinue,
+                                          self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7)
+
+
+class CommandLong(MavCommand):
+    """
+    https://mavlink.io/en/messages/common.html#COMMAND_INT
+    """
+    def __init__(self,
+                 mav_connection,
+                 command_id,
+                 p1=0,
+                 p2=0,
+                 p3=0,
+                 p4=0,
+                 p5=0,
+                 p6=0,
+                 p7=0,
+                 target_system=0,
+                 target_component=0):
+        super(MavCommand, self).__init__(mav_connection,
+                                         command_id,
+                                         p1=p1, p2=p2, p3=p3, p4=p4, p5=p5, p6=p6, p7=p7,
+                                         target_system=target_system,
+                                         target_component=target_component)
+        self.p5 = float(self.p5)
+        self.p6 = float(self.p6)
+
+    def set_command_send_method(self):
+        self.command_send_method = self.mav_connection.mav.command_int_send
+        self.command_send_args = lambda: (self.target_system,
+                                          self.target_component,
+                                          self.command_id,
+                                          self.confirmation,
+                                          self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7)
+
+class MissionItemInt(MavCommand):
+    """
+    https://mavlink.io/en/messages/common.html#MISSION_ITEM_INT
+    """
+    pass

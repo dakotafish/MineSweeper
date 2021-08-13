@@ -10,14 +10,16 @@ from threading import Thread
 import utils
 from param_protocol import Params
 from heartbeat_protocol import HeartBeat
-from command_protocol import CommandQueue, MavCommand
+from command_protocol import CommandQueue, CommandLong, CommandInt
 
+import math
 
 os.environ['MAVLINK20'] = '1'
 mavutil.set_dialect("ardupilotmega")
 
-LOGGER = utils.create_logger("copter")
+LOGGER = utils.create_logger("COPTER")
 MAV_RESULTS = mavutil.mavlink.enums["MAV_RESULT"]
+MAV_FRAMES = {v.name: k for k, v in mavutil.mavlink.enums['MAV_FRAME'].items()}
 
 
 class Copter:
@@ -111,9 +113,32 @@ class Copter:
     def initialize_command_queue(self):
         self.command_queue = CommandQueue(self)
 
-    def logging_message_hook(self, *args):
-        print(args[1])
-        LOGGER.debug("MESSAGE_HOOK_LOGGER: {}".format(str(args[1])))
+    def add_message_hook(self, some_function):
+        self.mav_connection.message_hooks.append(some_function)
+
+    def logging_message_hook(self, mav_connection, message):
+        print(message)
+        LOGGER.debug("MESSAGE_HOOK_LOGGER: {}".format(str(message)))
+
+    def location_logging_message_hook(self, mav_connection, message):
+        types_to_log = ["GPS_RAW_INT", "GLOBAL_POSITION_INT",] #"VFR_HUD"]
+        if message.get_type() in types_to_log:
+            raw_lat = message.lat
+            lat = raw_lat * 1.0e-7
+            rad_lat = math.radians(raw_lat) * 1.0e-7
+
+            raw_lon = message.lon
+            lon = raw_lon * 1.0e-7
+            rad_lon = math.radians(raw_lon) * 1.0e-7
+
+            raw_alt = message.alt
+            alt = raw_alt * 0.001
+            log_string = "RAW_MESSAGE: {}".format(message)
+            log_string += "\n\tRaw_Lat: {} \t Lat: {} \t Rad_Lat: {}".format(raw_lat, lat, rad_lat)
+            log_string += "\n\tRaw_Lon: {} \t Lon: {} \t Rad_Lon: {}".format(raw_lon, lon, rad_lon)
+            log_string += "\n\tRaw_Alt: {} \t Alt: {}".format(raw_alt, alt)
+            #print(log_string)
+            LOGGER.debug(log_string)
 
     ### State Commands ###
 
@@ -131,7 +156,7 @@ class Copter:
         force_arm = 0
         if force:
             force_arm = 21196
-        arm_command = MavCommand(mav_connection=self.mav_connection,
+        arm_command = CommandLong(mav_connection=self.mav_connection,
                                  command_id=mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
                                  p1=1,
                                  p2=force_arm)
@@ -144,7 +169,7 @@ class Copter:
         LOGGER.debug("Setting flight mode: {}".format(mode))
         mode_id = self.mav_connection.mode_mapping()[mode]
         base_mode = mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
-        set_flight_mode_command = MavCommand(mav_connection=self.mav_connection,
+        set_flight_mode_command = CommandLong(mav_connection=self.mav_connection,
                                              command_id=mavutil.mavlink.MAV_CMD_DO_SET_MODE,
                                              p1=base_mode,
                                              p2=mode_id)
@@ -159,7 +184,7 @@ class Copter:
               Set frequency_hz == 0 to request the default stream rate
             Note: this replaces REQUEST_DATA_STREAM"""
         frequency_hz = 1e6 / frequency_hz
-        set_message_interval_command = MavCommand(mav_connection=self.mav_connection,
+        set_message_interval_command = CommandLong(mav_connection=self.mav_connection,
                                                   command_id=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
                                                   p1=message_id,
                                                   p2=frequency_hz)
@@ -178,7 +203,7 @@ class Copter:
         self.params.set_param("ARMING_CHECK", 65470)
 
     def set_home_position(self, send=True):
-        set_home_position_command = MavCommand(mav_connection=self.mav_connection,
+        set_home_position_command = CommandLong(mav_connection=self.mav_connection,
                                                command_id=mavutil.mavlink.MAV_CMD_DO_SET_HOME,
                                                p1=1)
         self.command_queue.put(set_home_position_command)
@@ -190,7 +215,7 @@ class Copter:
     def simple_takeoff(self, target_altitude, send=True):
         if self.armed:
             target_altitude = float(target_altitude)
-            simple_takeoff_command = MavCommand(mav_connection=self.mav_connection,
+            simple_takeoff_command = CommandLong(mav_connection=self.mav_connection,
                                                 command_id=mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                                                 p7=target_altitude)
             self.command_queue.put(simple_takeoff_command)
@@ -200,9 +225,35 @@ class Copter:
             print("Copter must be armed before it can take off.")
 
     def simple_land(self, send=True):
-        simple_land_command = MavCommand(mav_connection=self.mav_connection,
+        simple_land_command = CommandLong(mav_connection=self.mav_connection,
                                          command_id=mavutil.mavlink.MAV_CMD_NAV_LAND)
         self.command_queue.put(simple_land_command)
+        if send:
+            self.command_queue.send_commands()
+
+    def simple_waypoint(self,
+                        hold_time=1,
+                        accept_radius=1,
+                        pass_radius=0,
+                        yaw=None,
+                        lat=None,
+                        lon=None,
+                        alt=None,
+                        send=True):
+        assert lat and lon and alt
+        #lat = lat * 1E7
+        #lon = lon * 1E7
+        simple_waypoint_command = CommandInt(mav_connection=self.mav_connection,
+                                             command_id=mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                                             frame=MAV_FRAMES['MAV_FRAME_GLOBAL_RELATIVE_ALT'],
+                                             p1=hold_time,
+                                             p2=accept_radius,
+                                             p3=pass_radius,
+                                             p4=0,
+                                             p5=lat,
+                                             p6=lon,
+                                             p7=alt)
+        self.command_queue.put(simple_waypoint_command)
         if send:
             self.command_queue.send_commands()
 
@@ -253,6 +304,32 @@ class Task(object):
             self.task_completed = False
         return self.task_completed
 
+class Location(object):
+    def __init__(self, lat, lon, alt, init_type, alt_relative=True):
+        if init_type == "RADIANS":
+            self.radians_lat = lat
+            self.radians_lon = lon
+            self.radians_alt = alt
+        elif init_type == "DEGREES":
+            self.degrees_lat = lat
+            self.degrees_lon = lon
+            self.degrees_alt = alt
+        elif init_type == "ENCODED":
+            self.encoded_lat = lat
+            self.encoded_lon = lon
+            self.encoded_alt = alt
+
+        # alt needs to be * 1E4 at some point.. https://mavlink.io/en/services/mission.html
+
+    def finish_init_with_encoded_params(self):
+        self.degrees_lat = self.encoded_lat * 1.0e-7
+        self.radians_lat = math.radians(self.degrees_lat)
+        self.degrees_lon = self.encoded_lon * 1.0e-7
+        self.radians_lon = math.radians(self.degrees_lon)
+        self.degrees_alt = self.encoded_alt * 1.0e-7
+        self.radians_alt = self.degrees_alt
+
+
 
 class Error(Exception):
     """Base class for Copter exceptions."""
@@ -269,6 +346,7 @@ if __name__ == "__main__":
     #copter = Copter("udpin:192.168.1.17:14550")
     utils.big_print("Connecting to Copter")
     copter = Copter()
+    copter.add_message_hook(copter.location_logging_message_hook)
     utils.big_print("Disabling Radio Failsafe")
     copter.disable_radio_failsafe()
     utils.big_print("Adding Set Flight Mode Command to Command Queue")
@@ -278,4 +356,5 @@ if __name__ == "__main__":
     utils.big_print("Adding Arm Vehicle Command to Command Queue")
     copter.arm_vehicle(force=False, send=False)
     utils.big_print("Adding Takeoff Command to Command Queue and Sending all commands.")
-    copter.simple_takeoff(target_altitude=20, send=True)
+    copter.simple_takeoff(target_altitude=20, send=False)
+    copter.simple_waypoint(lat=376193729, lon=-1223766375, alt=30, send=True)
