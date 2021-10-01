@@ -10,15 +10,13 @@ from pymavlink import mavutil
 from threading import Thread
 #
 import utils
-import uuid
-#from param_protocol import Params
-#from heartbeat_protocol import HeartBeat
-#from command_protocol import CommandQueue, CommandLong, CommandInt
+from param_protocol import Params
+from heartbeat_protocol import HeartBeat
+from command_protocol import CommandInt, CommandLong, MissionItemInt
+from mission_protocol import Navigation
 
-import math
-
-os.environ['MAVLINK20'] = '1'
-mavutil.set_dialect("ardupilotmega")
+# os.environ['MAVLINK20'] = '1'
+# mavutil.set_dialect("ardupilotmega")
 
 LOGGER = utils.create_logger("COPTER")
 MAV_CMDS = mavutil.mavlink.enums["MAV_CMD"]
@@ -26,6 +24,7 @@ MAV_RESULTS = mavutil.mavlink.enums["MAV_RESULT"]
 MAV_FRAMES = {v.name: k for k, v in mavutil.mavlink.enums['MAV_FRAME'].items()}
 MAV_MISSION_TYPES = {v.name: k for k, v in mavutil.mavlink.enums['MAV_MISSION_TYPE'].items()}
 MAV_MISSION_RESULTS = mavutil.mavlink.enums["MAV_MISSION_RESULT"]
+
 
 class Copter:
 
@@ -51,9 +50,10 @@ class Copter:
         # 5 nav
         self.nav = Navigation(copter=self)
         self.message_router.message_listeners["MISSION_REQUEST_INT"].append(self.nav.mission_request_int_message_hook)
+        self.message_router.message_listeners["MISSION_REQUEST"].append(self.nav.mission_request_int_message_hook)
         self.message_router.message_listeners["MISSION_ACK"].append(self.nav.mission_upload_ack_message_hook)
-        self.message_router.message_listeners["MISSION_ITEM_REACHED"].append(self.nav.mission_progress_message_hook)
-        self.message_router.message_listeners["MISSION_CURRENT"].append(self.nav.mission_progress_message_hook)
+        #self.message_router.message_listeners["MISSION_ITEM_REACHED"].append(self.nav.mission_progress_message_hook)
+        #self.message_router.message_listeners["MISSION_CURRENT"].append(self.nav.mission_progress_message_hook)
 
 
     def arm(self, force=False, send=True):
@@ -66,6 +66,13 @@ class Copter:
         self.outbound_q.put(arm_command)
         if send:
             self.outbound_q.send_all()
+
+    def run_prearm_checks(self, send=True):
+        prearm_command = CommandLong(self.mav, 401)
+        self.outbound_q.put(prearm_command)
+        if send:
+            self.outbound_q.send_all()
+
 
     def set_flight_mode(self, mode="STABALIZE", send=True):
         mode_id = self.mav.mode_mapping()[mode]
@@ -156,150 +163,6 @@ class Copter:
             self.outbound_q.send_all()
 
 
-class Navigation(object):
-    def __init__(self, copter):
-        self.copter = copter
-        self.mav = copter.mav
-        self.target_system = copter.target_system
-        self.target_component = copter.target_component
-        self.mission = Mission(copter)
-        self.mission_ready = False
-        self.current_mission_item = None
-        self.change_to_mission_item = None
-        self.mission.create_square_survey_mission()
-        self.start_mission_immediately = True
-
-    def start_mission(self):
-        assert self.mission_ready
-        self.copter.set_flight_mode("AUTO")
-
-    def clear_all_waypoints(self):
-        self.mav.waypoint_clear_all_send()
-
-    def send_empty_mission(self):
-        # just a different way to clear the mission. basically the same as clear_all_waypoints()
-        self.mav.mav.mission_count_send(target_system=self.target_system,
-                                        target_component=self.target_component,
-                                        count=0,
-                                        mission_type=self.mission.type)
-
-    def upload_mission(self):
-        # this message initiates a mission upload: https://mavlink.io/en/messages/common.html#MISSION_COUNT
-        #  after sending this message we should receive self.mission.count # of MISSION_REQUEST_INT messages
-        # if self.mission_request_int_message_hook not in copter.message_router.message_listeners["MISSION_REQUEST_INT"]:
-        #     copter.message_router.message_listeners["MISSION_REQUEST_INT"].append(self.mission_request_int_message_hook)
-        # if self.mission_upload_ack_message_hook not in copter.message_router.message_listeners["MISSION_ACK"]:
-        #     copter.message_router.message_listeners["MISSION_ACK"].append(self.mission_upload_ack_message_hook)
-        self.mav.mav.mission_count_send(target_system=self.target_system,
-                                        target_component=self.target_component,
-                                        count=self.mission.count,
-                                        mission_type=self.mission.type)
-
-    def mission_request_int_message_hook(self, message):
-        # after send_mission_count() the vehicle will request each item in the mission
-        assert message.get_type() == "MISSION_REQUEST_INT"
-        assert message.mission_type == self.mission.type
-        mission_item = self.mission.get(message.seq)
-        mission_item.send()
-
-    def mission_upload_ack_message_hook(self, message):
-        # should receive a MISSION_ACK message back after mission upload is complete
-        assert message.get_type() == "MISSION_ACK"
-        upload_result = MAV_MISSION_RESULTS.get(message.type)
-        if upload_result.name == "MAV_MISSION_ACCEPTED":
-            self.mission_ready = True
-            if self.start_mission_immediately:
-                self.start_mission()
-            return None
-        else:
-            # TODO Need a better exception here
-            raise Exception("Mission upload fails. Result was: {}, {}".format(upload_result.name,
-                                                                              upload_result.description))
-
-    def set_current_mission_item(self, seq):
-        # set the current mission item to seq (seq is the index of a mission item)
-        assert seq in self.mission
-        self.change_to_mission_item = seq
-        self.mav.mav.mission_set_current_send(target_system=self.target_system, target_component=self.target_component,
-                                              seq=seq)
-        #if self.set_mission_item_message_hook not in self.copter.message_router.message_listeners["MISSION_CURRENT"]:
-        #    self.copter.message_router.message_listeners["MISSION_CURRENT"].append(self.set_mission_item_message_hook)
-
-    def mission_progress_message_hook(self, message):
-        assert message.get_type() in ["MISSION_ITEM_REACHED", "MISSION_CURRENT"]
-        if message.get_type() == "MISSION_ITEM_REACHED":
-            print("Mission Item #{} has been reached!".format(message.seq))
-            self.current_mission_item = message.seq
-        elif message.get_type() == "MISSION_CURRENT":
-            if self.change_to_mission_item == message.seq:
-                print("Mission Item was changed from #{} to #{} successfully!".format(self.current_mission_item,
-                                                                                      message.seq))
-                self.change_to_mission_item = None
-            else:
-                print("Moved on to Mission Item #{}.".format(message.seq))
-            self.current_mission_item = message.seq
-
-
-class Mission(dict):
-
-    def __init__(self, copter, *args, **kwargs):
-        super(dict, self).__init__(*args, **kwargs)
-        self.copter = copter
-        self.mav = copter.mav
-
-    def create_square_survey_mission(self, distance=10):
-        self.copter.set_home_position()
-        current_position = self.mav.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
-        bearing = current_position.hdg * .01
-        start_lat, start_lon, start_rel_alt = current_position.lat, current_position.lon, current_position.relative_alt
-        start_location = Location(start_lat, start_lon, start_rel_alt, bearing)
-        origin = geopy.Point(start_location.degrees_lat, start_location.degrees_lon, altitude=start_location.encoded_alt)
-        self[0] = MissionItemInt.from_location(self.mav,
-                                               mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
-                                               start_location,
-                                               0,
-                                               MAV_FRAMES['MAV_FRAME_GLOBAL_RELATIVE_ALT'],
-                                               current=True,
-                                               autocontinue=True)
-        for i in range(distance * 2):
-            seq = i
-            destination = geopy_distance(meters=distance).destination(origin, bearing)
-            seq_location = Location.from_destination(destination)
-            self[seq] = MissionItemInt.from_location(self.mav,
-                                                     mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
-                                                     seq_location,
-                                                     0,
-                                                    MAV_FRAMES['MAV_FRAME_GLOBAL_RELATIVE_ALT'],
-                                                     current=False,
-                                                     autocontinue=True)
-
-
-
-class Location(object):
-
-    def __init__(self, lat, lon, alt, bearing=0):
-        self.encoded_lat = lat
-        self.degrees_lat = self.encoded_lat * 1.0e-7
-        self.radians_lat = math.radians(self.degrees_lat)
-        self.encoded_lon = lon
-        self.degrees_lon = self.encoded_lon * 1.0e-7
-        self.radians_lon = math.radians(self.degrees_lon)
-        self.encoded_alt = alt
-        self.alt = self.encoded_alt * 1E4
-        if bearing:
-            self.encoded_bearing = bearing
-            self.bearing  = self.encoded_bearing * .01
-
-    @classmethod
-    def from_destination(cls, destination):
-        lat = destination.latitude * 1.0e-7
-        lon = destination.longitude * 1.0e-7
-        alt = destination.altitude
-        return cls(lat, lon, alt)
-
-
-
-
 class MessageRouter(object):
 
     def __init__(self, copter):
@@ -315,10 +178,38 @@ class MessageRouter(object):
             "COMMAND_ACK": dict(),
             "MISSION_ACK": [],
             "MISSION_REQUEST_INT": [],
-            "MISSION_ITEM_REACHED": [],
-            "MISSION_CURRENT": [],
+            "MISSION_REQUEST": [],
+            "MISSION_ITEM_REACHED": dict(),
+            "MISSION_CURRENT": dict(),
         }
         self.ad_hoc_log = []
+        self.log_all_messages = True
+
+    def message_listeners_contains(self, message_type, key=None):
+        # Return True if message_type [and optionally key] are in the message_listeners.
+        if message_type not in self.message_listeners:
+            return False
+        if key:
+            if key not in self.message_listeners[message_type]:
+                return False
+        return True
+
+    def add_to_message_listeners_list(self, message_type, message_hook):
+        if message_type in self.message_listeners:
+            self.message_listeners.append(message_hook)
+        else:
+            self.message_listeners[message_type] = [message_hook]
+
+    def add_to_message_listeners_dict(self, message_type, key, message_hook):
+        if message_type in self.message_listeners:
+            self.message_listeners[message_type][key] = message_hook
+        else:
+            self.message_listeners[message_type] = {key: message_hook}
+
+    def remove_from_message_listeners_dict(self, message_type, key):
+        if message_type in self.message_listeners:
+            if key in self.message_listeners[message_type]:
+                del self.message_listeners[message_type][key]
 
     def mav_drain(self):
         """
@@ -348,6 +239,10 @@ class MessageRouter(object):
         if message_type in self.ad_hoc_log:
             print(message)
 
+        if self.log_all_messages:
+            if "MISSION" in message.get_type():
+                LOGGER.debug(message)
+
         if message_type in self.message_listeners:
             message_listeners = self.message_listeners[message_type]
             if type(message_listeners) == dict:
@@ -361,7 +256,7 @@ class MessageRouter(object):
             # thread is already running
             return True
         else:
-            # if the thread isn't defined or if it was been stopped then just re-initialize and start it
+            # if the thread isn't defined or if it was been stopped then just re-define and start it
             self.mav_drain_thread = Thread(target=self.mav_drain, daemon=True)
             self.mav_drain_thread.start()
 
@@ -418,389 +313,7 @@ class OutboundMessageQueue(object):
         self.queue.put(command)
 
 
-class HeartBeatMessage(object):
-    """
-    A wrapper for heartbeat messages.
-    """
 
-    def __init__(self, message):
-        assert message.name == "HEARTBEAT"
-        self.type = message.type
-        self.autopilot = message.autopilot
-        self.base_mode = message.base_mode
-        self.custom_mode = message.custom_mode
-        self.system_status = message.system_status
-        self.mavlink_version = message.mavlink_version
-        self.raw_message = message
-
-    def __str__(self):
-        return str(self.raw_message)
-
-
-class HeartBeat(object):
-    """
-    HeartBeat manages the heartbeat connection with the vehicle.
-    message_router will route HEARTBEAT messages to the heartbeat_message_hook.
-    -- We send a HEARTBEAT and set a timer for 1 second.
-    -- If we receive a heartbeat back before the timer goes off then we reset the timer and send another heartbeat.
-    -- If the timer goes off before we receive a heartbeat back then we increment a counter and send another heartbeat.
-    -- If the counter goes over 6 missed heartbeats then we've lost contact and should throw an exception.
-    MAVLink docs: https://mavlink.io/en/services/heartbeat.html
-    """
-    def __init__(self, copter, *args, **kwargs):
-        self.mav = copter.mav
-        self.target_system = copter.target_system
-        self.target_component = copter.target_component
-        self.frequency = 1
-        self.missed_heartbeats = 0
-        self.heartbeat = None
-        signal.signal(signal.SIGALRM, self.alarm_signal_handler)
-
-    def heartbeat_message_hook(self, message):
-        # if we receive a HEARTBEAT then stop our timer, reset the missed heartbeat count, and send a fresh heartbeat
-        assert message.get_type() == "HEARTBEAT"
-        self.stop_timer()
-        self.missed_heartbeats = 0
-        self.send_heartbeat()
-        self.heartbeat = HeartBeatMessage(message)
-        # you'll need this later.. bit_map = utils.bit_mapper(message.base_mode, debug=True)
-
-    def send_heartbeat(self):
-        self.start_timer(self.frequency)
-        if self.heartbeat:
-            # this might be better:
-            self.mav.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
-                                                   mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                                                   self.heartbeat.base_mode,
-                                                   self.heartbeat.custom_mode,
-                                                   self.heartbeat.system_status)
-        else:
-            self.mav.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
-                                                   mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                                                   0, 0, 0)
-
-    def start_timer(self, timeout):
-        # requests that a SIGALRM signal is sent after the timeout period (in seconds)
-        signal.alarm(timeout)
-
-    def stop_timer(self):
-        # passing 0 to signal.alarm() disables it
-        signal.alarm(0)
-
-    def alarm_signal_handler(self, signum, frame):
-        # if our timer goes off then we missed a heartbeat, increment the count, send a new heartbeat
-        #  and throw an exception if we miss six heartbeats in a row
-        self.missed_heartbeats += 1
-        if self.missed_heartbeats >= 6:
-            LOGGER.error("HEARTBEAT: MISSED 6 IN A ROW.")
-            raise Exception
-        self.send_heartbeat()
-
-
-class Param(object):
-    def __init__(self, message):
-        assert message.name == "PARAM_VALUE"
-        self.id = message.param_id
-        self.value = message.param_value
-        self.type = message.param_type
-        self.count = message.param_count
-        self.index = message.param_index
-        self.timestamp = message._timestamp
-        self.blocking = False
-        self.timeout = 1
-        self.raw_message = message
-
-    def __str__(self):
-        return "ID_{}_VALUE_{}_COUNT_{}_INDEX_{}".format(self.id, self.value, self.count, self.index)
-
-
-class Params(dict):
-    """
-    Subclasses dict; storing each param as a key/value pair
-     - also implements a message_hook broker in the param messages
-    """
-    def __init__(self, copter, *args, **kwargs):
-        super(dict, self).__init__(*args, **kwargs)
-        self.mav = copter.mav
-        self.target_system = copter.target_system
-        self.target_component = copter.target_component
-        self.param_draining_thread = Thread(target=self.drain_params, daemon=False)
-        self.initialization_complete = False # should remain false until we receive all params
-
-    def param_message_hook(self, message):
-        # receives the message from message_router and updates the param value in our dict
-        assert message.get_type() == "PARAM_VALUE"
-        param = Param(message)
-        self[param.id] = param
-        if param.index == (param.count - 1):
-            self.initialization_complete = True
-
-    def get_all_params(self):
-        # only sends the param_request_list message, param_message_hook will handle the responses
-        self.mav.mav.param_request_list_send(self.target_system, self.target_component)
-        self.start_param_draining_thread()
-        self.wait_for_initialization_complete()
-
-    def wait_for_initialization_complete(self):
-        while not self.initialization_complete:
-            self.mav.recv_match(type='PARAM_VALUE')
-
-    def start_param_draining_thread(self):
-        if not self.param_draining_thread.is_alive():
-            self.param_draining_thread = Thread(target=self.drain_params, daemon=False)
-            self.param_draining_thread.start()
-
-    def drain_params(self):
-        no_response_count = 0
-        while no_response_count <= 5:
-            response = self.mav.recv_match(type='PARAM_VALUE', blocking=True, timeout=1)
-            if response:
-                no_response_count = 0
-                continue
-                # no need to put this message on the queue, param_message_hook will already do that.
-                # self.message_queue.put(response)
-            else:
-                if self.initialization_complete:
-                    break
-                no_response_count += 1
-
-    def receive_message(self, message):
-        # updates the param value in our dict
-        param = Param(message)
-        self[param.id] = param
-        if param.index == (param.count - 1):
-            self.initialization_complete = True
-
-    def is_initialization_complete(self) -> bool:
-        return self.initialization_complete
-
-    def read_param(self, param_id) -> Param:
-        """
-        Reads the param value from the vehicle for a given param_id and returns that Param
-        :rtype: Param
-        """
-        old_timestamp = self[param_id].timestamp
-        self.mav.mav.param_request_read_send(self.target_system,
-                                                        self.target_component,
-                                                        param_id.encode(),
-                                                        -1)
-        current_timestamp = self[param_id].timestamp
-        loop_time = 0
-        while old_timestamp == current_timestamp:
-            # copter.drain_mav is running in another thread which will eventually route the param_value message
-            #  to param_message_hook which will in turn update our dict. So we just wait for the param to be updated
-            time.sleep(.5)
-            loop_time += .5
-            current_timestamp = self[param_id].timestamp
-            if loop_time / .5 >= 10:
-                # if this goes over ~5 seconds then something went wrong
-                # TODO need exception here
-                break
-        return self[param_id]
-
-    def set_param(self, param_id, param_value) -> Param:
-        """
-        Sends a message to the vehicle to set <param_id> to <param_value> and returns the up-to-date Param
-        :param param_id: String, the param_id key for the Param
-        :param param_value: Float or Int, the value to set the param to
-        :return: Param, the most up-to-date Param
-        """
-        param = self[param_id]
-        old_timestamp = param.timestamp
-        param.value = param_value
-        self.mav.mav.param_set_send(self.target_system,
-                                               self.target_component,
-                                               param.id.encode(),
-                                               param.value,
-                                               param.type)
-        current_timestamp = self[param_id].timestamp
-        loop_time = 0
-        while old_timestamp == current_timestamp:
-            # copter.drain_mav is running in another thread which will eventually route the param_value message
-            #  to param_message_hook which will in turn update our dict. So we just wait for the param to be updated
-            time.sleep(.5)
-            loop_time += .5
-            current_timestamp = self[param_id].timestamp
-            if loop_time / .5 >= 10:
-                # if this goes over ~5 seconds then something went wrong
-                # TODO need exception here
-                break
-        updated_param = self.read_param(param_id)
-        if updated_param.value != param_value:
-            # TODO need exception here
-            print(f"PARAM UPDATE FAILED! Desired Value: {param_value}\t Actual Value: {updated_param.value}")
-            LOGGER.error(f"PARAM UPDATE FAILED! Desired Value: {param_value}\t Actual Value: {updated_param.value}")
-        return updated_param
-
-
-class MavCommand(object):
-    """
-    Base MavCommand class - a wrapper for MAV_CMD's: https://mavlink.io/en/messages/common.html#mav_commands
-    Should be subclassed by either:
-        CommandInt() - where params 5 & 6 are floats
-        or
-        CommandLong() - where all params are ints
-    """
-
-    # https://mavlink.io/en/messages/common.html#mav_commands
-    def __init__(self, mav, command_id, frame=None, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0,
-                 target_system=0, target_component=0):
-        self.uuid = uuid.uuid4().hex
-        self.mav = mav
-        self.confirmation = 0
-        self.target_system = target_system
-        self.target_component = target_component
-        if command_id in MAV_CMDS:
-            self.command_id = command_id
-            command = MAV_CMDS[command_id]
-            self.command_name = command.name
-            self.command_description = command.description
-            assert len(command.param) == 7
-            param_descriptions = command.param
-            self.p1 = float(0 or p1)
-            self.p1_description = param_descriptions[1]
-            self.p2 = float(0 or p2)
-            self.p2_description = param_descriptions[2]
-            self.p3 = float(0 or p3)
-            self.p3_description = param_descriptions[3]
-            self.p4 = float(0 or p4)
-            self.p4_description = param_descriptions[4]
-            self.p5 = 0 or p5
-            self.p5_description = param_descriptions[5]
-            self.p6 = 0 or p6
-            self.p6_description = param_descriptions[6]
-            self.p7 = float(0 or p7)
-            self.p7_description = param_descriptions[7]
-        else:
-            print("No MAV_CMD found for command_id {}.".format(command_id))
-
-        #self.thread = Thread(target=self.send_command_worker, daemon=False)
-        self.command_complete = False
-        self.is_command_complete = lambda: self.command_complete
-        self.command_send_method = None
-        self.command_send_args = None
-        self.set_command_send_method()
-
-    def set_command_send_method(self):
-        raise NotImplementedError
-
-    def send(self):
-        self.command_send_method(*self.command_send_args())
-
-    def command_message_hook(self, ack_message):
-        assert ack_message.get_type() == "COMMAND_ACK"
-        if ack_message and ack_message.command == self.command_id:
-            mav_result = MAV_RESULTS[ack_message.result]
-            print(mav_result.name, mav_result.description)
-            if mav_result.name == "MAV_RESULT_ACCEPTED":
-                print("Command Completed: {}".format(str(ack_message)))
-                self.command_complete = True
-                return ack_message
-            elif mav_result.name == "MAV_RESULT_TEMPORARILY_REJECTED":
-                # most likely just need to wait for some other command to finish
-                time.sleep(1)
-                self.send()
-            elif mav_result.name == "MAV_RESULT_DENIED":
-                # Command is invalid (is supported but has invalid parameters).
-                # Retrying same command and parameters will not work.
-                self.command_complete = True
-                # TODO need better exceptions here
-                raise Exception
-            elif mav_result.name == "MAV_RESULT_FAILED":
-                self.command_complete = True
-                # TODO need better exceptions here
-                raise Exception
-            elif mav_result.name == "MAV_RESULT_IN_PROGRESS":
-                # Per the MavLink documentation we just need to increase the timeout and wait
-                # We don't need to re-send the command and if we do we'll just get another progress message
-                print("Command in Progress. Currently at {}% complete.".format(ack_message.progress))
-                time.sleep(1)
-        else:
-            # if the command drops for some reason then we just increment confirmation and re-send it
-            self.confirmation += 1
-            self.send()
-
-
-class CommandInt(MavCommand):
-    """
-    https://mavlink.io/en/messages/common.html#COMMAND_INT
-    """
-    def __init__(self, mav, command_id, frame, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0,
-                 target_system=0, target_component=0):
-        super().__init__(mav,
-                         command_id,
-                         frame=frame,
-                         p1=p1, p2=p2, p3=p3, p4=p4, p5=p5, p6=p6, p7=p7,
-                         target_system=target_system,
-                         target_component=target_component)
-        self.frame = frame
-        self.current = 0 # always zero for CommandInt
-        self.autocontinue = 0 # always zero for CommandInt
-        self.p5 = int(self.p5)
-        self.p6 = int(self.p6)
-
-    def set_command_send_method(self):
-        self.command_send_method = self.mav.mav.command_int_send
-        self.command_send_args = lambda: (self.target_system, self.target_component, self.frame, self.command_id,
-                                          self.current, self.autocontinue, self.p1, self.p2, self.p3, self.p4, self.p5,
-                                          self.p6, self.p7)
-
-
-class CommandLong(MavCommand):
-    """
-    https://mavlink.io/en/messages/common.html#COMMAND_INT
-    """
-    def __init__(self, mav, command_id, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, target_system=0, target_component=0):
-        super().__init__(mav,
-                         command_id,
-                         p1=p1, p2=p2, p3=p3, p4=p4, p5=p5, p6=p6, p7=p7,
-                         target_system=target_system,
-                         target_component=target_component)
-        self.p5 = float(self.p5)
-        self.p6 = float(self.p6)
-
-    def set_command_send_method(self):
-        self.command_send_method = self.mav.mav.command_long_send
-        self.command_send_args = lambda: (self.target_system, self.target_component, self.command_id, self.confirmation,
-                                          self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7)
-
-
-class MissionItemInt(MavCommand):
-    """
-    https://mavlink.io/en/messages/common.html#MISSION_ITEM_INT
-    """
-    def __init__(self, mav, command_id, seq, frame,
-                 current=False, autocontinue=True, mission_type=MAV_MISSION_TYPES["MAV_MISSION_TYPE_MISSION"],
-                 p1=0, p2=0, p3=0, p4=0, p5=0, p6=0, p7=0, target_system=0, target_component=0):
-        super().__init__(mav,
-                         command_id,
-                         p1=p1, p2=p2, p3=p3, p4=p4, p5=p5, p6=p6, p7=p7,
-                         target_system=target_system,
-                         target_component=target_component)
-        self.seq = seq
-        self.frame = frame
-        self.current = current
-        self.autocontinue = autocontinue
-        self.mission_type = mission_type
-        self.p5 = float(self.p5)
-        self.p6 = float(self.p6)
-        # note: p7 (altitude) can be an int field and encoded as meters x 1E4 or a float and sent as is?
-
-    @classmethod
-    def from_location(cls, mav, command_id, location, seq, frame,
-                      current=False, autocontinue=True, mission_type=MAV_MISSION_TYPES["MAV_MISSION_TYPE_MISSION"],
-                      p1=0, p2=0, p3=0, p4=0, target_system=0, target_component=0):
-        # alternate constructor that uses location class
-        p5, p6, p7 = location.encoded_lon, location.encoded_lat, location.encoded_alt
-        return cls(mav, command_id, seq, frame,
-                 current, autocontinue, mission_type,
-                 p1, p2, p3, p4, p5, p6, p7, target_system=0, target_component=0)
-
-    def set_command_send_method(self):
-        self.command_send_method = self.mav.mav.mission_item_int_send
-        self.command_send_args = lambda: (self.target_system, self.target_component, self.seq, self.frame,
-                                          self.command_id, self.current, self.autocontinue, self.p1, self.p2, self.p3,
-                                          self.p4, self.p5, self.p6, self.p7, self.mission_type)
 
 
 # class Location(object):
@@ -865,19 +378,19 @@ if __name__ == "__main__":
     #copter = Copter("udpin:192.168.1.17:14550")
     utils.big_print("Connecting to Copter")
     copter = Copter()
-    #copter.add_message_hook(copter.location_logging_message_hook)
-    utils.big_print("Requesting data stream of vehicle position.")
-    copter.request_data_stream(mavutil.mavlink.MAV_DATA_STREAM_POSITION)
-    utils.big_print("Disabling Radio Failsafe")
-    copter.disable_radio_failsafe()
-    utils.big_print("Adding Set Flight Mode Command to Command Queue")
-    copter.set_flight_mode("GUIDED", send=True)
-    utils.big_print("Adding Set Home Position Command to Command Queue")
-    #copter.set_home_position(send=False)
-    utils.big_print("Adding Arm Vehicle Command to Command Queue")
-    copter.arm(force=False, send=True)
-    utils.big_print("Adding Takeoff Command to Command Queue and Sending all commands.")
-    copter.simple_takeoff(target_altitude=20, send=True)
-    copter.set_flight_mode("AUTO", send=True)
-    #copter.simple_waypoint(lat=376193729, lon=-1223766375, alt=30, send=True)
-    # copter.mav.mav.request_data_stream_send(copter.target_system, copter.target_component, mavutil.mavlink.MAV_DATA_STREAM_POSITION, 1,1)
+    # #copter.add_message_hook(copter.location_logging_message_hook)
+    # utils.big_print("Requesting data stream of vehicle position.")
+    # copter.request_data_stream(mavutil.mavlink.MAV_DATA_STREAM_POSITION)
+    # utils.big_print("Disabling Radio Failsafe")
+    # copter.disable_radio_failsafe()
+    # utils.big_print("Adding Set Flight Mode Command to Command Queue")
+    # copter.set_flight_mode("GUIDED", send=True)
+    # utils.big_print("Adding Set Home Position Command to Command Queue")
+    # #copter.set_home_position(send=False)
+    # utils.big_print("Adding Arm Vehicle Command to Command Queue")
+    # copter.arm(force=False, send=True)
+    # utils.big_print("Adding Takeoff Command to Command Queue and Sending all commands.")
+    # copter.simple_takeoff(target_altitude=20, send=True)
+    # copter.set_flight_mode("AUTO", send=True)
+    # #copter.simple_waypoint(lat=376193729, lon=-1223766375, alt=30, send=True)
+    # # copter.mav.mav.request_data_stream_send(copter.target_system, copter.target_component, mavutil.mavlink.MAV_DATA_STREAM_POSITION, 1,1)
